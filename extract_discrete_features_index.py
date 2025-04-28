@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import faiss
-import tqdm
+from tqdm import tqdm
 from datasets import load_dataset
 from loguru import logger
 
