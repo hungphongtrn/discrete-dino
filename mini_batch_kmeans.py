@@ -18,8 +18,9 @@ DIM = 768  # Feature dimension
 CENTROIDS_SAVE_DIR = (
     "./batch_centroids"  # Directory to save intermediate centroids
 )
-NUM_BATCHES_PER_PROCESS = 10  # Number of batches to process together in one KMeans run
-START_BATCH_ID = 5
+NUM_BATCHES_PER_PROCESS = 40  # Number of batches to process together in one KMeans run
+START_BATCH_ID = 15
+NUM_CORES = os.cpu_count()  # Number of CPU cores available
 
 if __name__ == "__main__":
     # Create the directory for saving centroids if it doesn't exist
@@ -64,7 +65,7 @@ if __name__ == "__main__":
                 subset = f"batch_{i}"
                 # Use streaming=True if memory becomes an issue, but requires different handling
                 ds = load_dataset(
-                    REPO_ID, subset, split="train", trust_remote_code=True
+                    REPO_ID, subset, split="train", trust_remote_code=True, num_proc=NUM_CORES
                 )  # Added trust_remote_code
                 batch_features_list = ds["image_features"]
 
