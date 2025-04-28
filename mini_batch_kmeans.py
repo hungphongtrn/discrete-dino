@@ -19,6 +19,7 @@ CENTROIDS_SAVE_DIR = (
     "./batch_centroids"  # Directory to save intermediate centroids
 )
 NUM_BATCHES_PER_PROCESS = 10  # Number of batches to process together in one KMeans run
+START_BATCH_ID = 5
 
 if __name__ == "__main__":
     # Create the directory for saving centroids if it doesn't exist
@@ -37,7 +38,7 @@ if __name__ == "__main__":
 
     # Iterate through batches in steps of NUM_BATCHES_PER_PROCESS
     for start_batch_idx in tqdm(
-        range(0, FINAL_BATCH_ID + 1, NUM_BATCHES_PER_PROCESS),
+        range(START_BATCH_ID, FINAL_BATCH_ID + 1, NUM_BATCHES_PER_PROCESS),
         desc="Processing Batch Groups",
     ):
         group_start_time = time.time()
