@@ -6,6 +6,9 @@ from tqdm import tqdm
 from loguru import logger
 import os
 
+logger.remove()
+logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
+
 REPO_ID = "hungphongtrn/vqav2_extracted_features"
 FINAL_BATCH_ID = 80  # Process batches 0 to 80
 N_CENTROIDS_PER_BATCH = 8196  # Target number of centroids for each batch's KMeans

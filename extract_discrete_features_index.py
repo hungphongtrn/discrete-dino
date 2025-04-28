@@ -3,6 +3,10 @@ import numpy as np
 import faiss
 import tqdm
 from datasets import load_dataset
+from loguru import logger
+
+logger.remove()
+logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
 
 SAVED_PATH = "./centroids.npy"
 REPO_ID = "hungphongtrn/vqav2_extracted_features"
@@ -12,11 +16,11 @@ FINAL_BATCH_ID = 80  # Process batches 0 to 80
 if __name__ == "__main__":
     # Check if the file exists
     if not os.path.exists(SAVED_PATH):
-        print(f"File {SAVED_PATH} does not exist.")
+        logger.info(f"File {SAVED_PATH} does not exist.")
     else:
         # Load the centroids
         centroids = np.load(SAVED_PATH)
-        print(f"Centroids loaded successfully with shape: {centroids.shape}")
+        logger.info(f"Centroids loaded successfully with shape: {centroids.shape}")
 
     input_dim, num_clusters = centroids.shape
     # Generate random data since no retraining data is provided
@@ -35,18 +39,18 @@ if __name__ == "__main__":
     all_batches = {"text": [], "feature_indices": []}
     # Extract the index
     for i in tqdm(range(FINAL_BATCH_ID + 1), desc="Processing Batches"):
-        print(f"--- Processing Batch {i} ---")
+        logger.info(f"--- Processing Batch {i} ---")
         ds = None
 
         try:
             # Step 1a: Load features for the current batch
-            print(f"Loading features for batch {i}...")
+            logger.info(f"Loading features for batch {i}...")
             subset = f"batch_{i}"
             ds = load_dataset(REPO_ID, subset, split="train")
             batch_features_list = ds["image_features"]
 
             if not batch_features_list:
-                print(f"Batch {i} is empty or has no features. Skipping.")
+                logger.info(f"Batch {i} is empty or has no features. Skipping.")
                 continue
 
             batch_features = np.array(batch_features_list, dtype=np.float32)
@@ -55,14 +59,16 @@ if __name__ == "__main__":
                 batch_features = batch_features.reshape(-1, batch_features.shape[-1])
 
             if batch_features.shape[0] == 0:
-                print(f"Batch {i} resulted in 0 features after reshape. Skipping.")
+                logger.info(
+                    f"Batch {i} resulted in 0 features after reshape. Skipping."
+                )
                 continue
 
-            print(f"Batch {i}: Features shape: {batch_features.shape}")
+            logger.info(f"Batch {i}: Features shape: {batch_features.shape}")
 
             # Step 1b: Check if enough data points for KMeans
             if batch_features.shape[0] < num_clusters:
-                print(
+                logger.info(
                     f"Batch {i} has only {batch_features.shape[0]} features, which is less than the required {num_clusters} for K-Means. Skipping K-Means for this batch."
                 )
                 continue
@@ -77,4 +83,4 @@ if __name__ == "__main__":
             all_batches["feature_indices"].extend(indices.flatten().tolist())
 
         except Exception as e:
-            print(f"Error processing batch {i}: {e}")
+            logger.info(f"Error processing batch {i}: {e}")

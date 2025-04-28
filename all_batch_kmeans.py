@@ -8,6 +8,9 @@ from loguru import logger
 import os
 import glob  # To find the saved centroid files
 
+logger.remove()
+logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
+
 # --- Configuration ---
 CENTROIDS_SAVE_DIR = (
     "./batch_centroids"  # Directory WHERE intermediate centroids WERE saved
