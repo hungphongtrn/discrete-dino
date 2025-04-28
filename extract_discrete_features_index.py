@@ -24,7 +24,7 @@ if __name__ == "__main__":
 
     num_clusters, input_dim = centroids.shape
     # Generate random data since no retraining data is provided
-    data = np.random.rand(2, input_dim).astype("float32")
+    data = np.random.rand(num_clusters, input_dim).astype("float32")
 
     kmeans = faiss.Kmeans(
         input_dim, num_clusters, verbose=True, niter=0, nredo=0, seed=42
