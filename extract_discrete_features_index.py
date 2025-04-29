@@ -11,12 +11,15 @@ logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
 SAVED_PATH = "./centroids.npy"
 REPO_ID = "hungphongtrn/vqav2_extracted_features"
 FINAL_BATCH_ID = 80  # Process batches 0 to 80
+CENTROIDS_REPO = "hungphongtrn/k-means-final-centroids-20250428"
 
 
 if __name__ == "__main__":
     # Check if the file exists
     if not os.path.exists(SAVED_PATH):
         logger.info(f"File {SAVED_PATH} does not exist.")
+        centroids = np.from_array(CENTROIDS_REPO, split="train")
+        logger.info(f"Centroids shape: {centroids.shape}")
     else:
         # Load the centroids
         centroids = np.load(SAVED_PATH)
