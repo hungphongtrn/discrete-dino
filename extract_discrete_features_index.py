@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import faiss
+from faiss import IndexFlatL2
 from tqdm import tqdm
 from datasets import load_dataset
 from loguru import logger
@@ -24,19 +24,12 @@ if __name__ == "__main__":
 
     num_clusters, input_dim = centroids.shape
     # Generate random data since no retraining data is provided
-    data = np.random.rand(num_clusters, input_dim).astype("float32")
-
-    kmeans = faiss.Kmeans(
-        input_dim, num_clusters, verbose=True, niter=0, nredo=0, seed=42
-    )
-    kmeans.train(
-        data, init_centroids=centroids
-    )  # this ensures that kmeans.index is created
-    assert np.sum(kmeans.centroids - centroids) == 0, (
-        "centroids are not the same"
-    )  # sanity check
+    index = IndexFlatL2(input_dim)
+    index.reset()
+    index.add(centroids)
 
     all_batches = {"text": [], "feature_indices": []}
+
     # Extract the index
     for i in tqdm(range(FINAL_BATCH_ID + 1), desc="Processing Batches"):
         logger.info(f"--- Processing Batch {i} ---")
@@ -46,7 +39,7 @@ if __name__ == "__main__":
             # Step 1a: Load features for the current batch
             logger.info(f"Loading features for batch {i}...")
             subset = f"batch_{i}"
-            ds = load_dataset(REPO_ID, subset, split="train")
+            ds = load_dataset(REPO_ID, subset, split="train", num_proc=64)
             batch_features_list = ds["image_features"]
 
             if not batch_features_list:
@@ -74,13 +67,14 @@ if __name__ == "__main__":
                 continue
 
             # Step 2: Perform KMeans clustering
-            _, indices = kmeans.assign(batch_features)
+            _, indices = index.search(batch_features, 1)
+            indices = indices.ravel()
             assert indices.shape[0] == batch_features.shape[0], (
                 "indices and batch_features do not match in size"
             )
 
             all_batches["text"].extend(ds["text"])
-            all_batches["feature_indices"].extend(indices.flatten().tolist())
+            all_batches["feature_indices"].extend(indices.tolist())
 
         except Exception as e:
             logger.info(f"Error processing batch {i}: {e}")
