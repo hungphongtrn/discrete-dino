@@ -18,7 +18,7 @@ if __name__ == "__main__":
     # Check if the file exists
     if not os.path.exists(SAVED_PATH):
         logger.info(f"File {SAVED_PATH} does not exist.")
-        centroids = np.array(CENTROIDS_REPO, split="train")
+        centroids = np.array(load_dataset(CENTROIDS_REPO, split="train"))
         logger.info(f"Centroids shape: {centroids.shape}")
     else:
         # Load the centroids
