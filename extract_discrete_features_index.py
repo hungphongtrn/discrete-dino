@@ -2,7 +2,7 @@ import os
 import numpy as np
 from faiss import IndexFlatL2
 from tqdm import tqdm
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from loguru import logger
 
 logger.remove()
@@ -18,7 +18,9 @@ if __name__ == "__main__":
     # Check if the file exists
     if not os.path.exists(SAVED_PATH):
         logger.info(f"File {SAVED_PATH} does not exist.")
-        centroids = np.array(load_dataset(CENTROIDS_REPO, split="train")['centroid_features'])
+        centroids = np.array(
+            load_dataset(CENTROIDS_REPO, split="train")["centroid_features"]
+        )
         logger.info(f"Centroids shape: {centroids.shape}")
     else:
         # Load the centroids
@@ -31,7 +33,7 @@ if __name__ == "__main__":
     index.reset()
     index.add(centroids)
 
-    all_batches = {"text": [], "feature_indices": []}
+    all_batches = {"texts": [], "feature_indices": []}
 
     # Extract the index
     for i in tqdm(range(FINAL_BATCH_ID + 1), desc="Processing Batches"):
@@ -76,8 +78,13 @@ if __name__ == "__main__":
                 "indices and batch_features do not match in size"
             )
 
-            all_batches["text"].extend(ds["text"])
+            all_batches["texts"].extend(ds["texts"])
             all_batches["feature_indices"].extend(indices.tolist())
 
         except Exception as e:
             logger.info(f"Error processing batch {i}: {e}")
+
+    ds = Dataset.from_dict(all_batches)
+    ds.push_to_hub(
+        "hungphongtrn/vqav2_extracted_features_index", split="train", num_shards=64
+    )
