@@ -3,4 +3,4 @@ import os
 
 
 REPO_ID = "hungphongtrn/vqav2_extracted_features"
-snapshot_download(repo_id=REPO_ID, max_workers=os.cpu_count())
+snapshot_download(repo_id=REPO_ID, max_workers=os.cpu_count(), repo_type="dataset")
