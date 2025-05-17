@@ -19,7 +19,7 @@ OUTPUT_REPO = "hungphongtrn/vqav2_extracted_features_index_chunked"  # Using a n
 # Adjust based on your CPU cores. Use more workers for loading within a chunk.
 NUM_LOAD_WORKERS = max(1, multiprocessing.cpu_count())
 # Number of batches to process simultaneously in one chunk
-CHUNK_SIZE = 10
+CHUNK_SIZE = 1 # Set to 1 for debugging
 # Temporary directory to save intermediate chunk datasets
 TEMP_DATA_DIR = "./temp_indexed_chunks"
 # --- End Configuration ---
