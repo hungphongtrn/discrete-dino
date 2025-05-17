@@ -18,8 +18,8 @@ CENTROIDS_REPO = "hungphongtrn/k-means-final-centroids-20250428"
 OUTPUT_REPO = "hungphongtrn/vqav2_extracted_features_index_chunked"  # Using a new repo name to avoid overwriting
 # Adjust based on your CPU cores. Use more workers for loading within a chunk.
 NUM_LOAD_WORKERS = max(1, multiprocessing.cpu_count())
-# Number of batches to process simultaneously in one chunk
-CHUNK_SIZE = 1 # Set to 1 for debugging
+# NumberS of batches to process simultaneously in one chunk
+CHUNK_SIZE = 20
 # Temporary directory to save intermediate chunk datasets
 TEMP_DATA_DIR = "./temp_indexed_chunks"
 # --- End Configuration ---
