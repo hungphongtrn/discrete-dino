@@ -2,7 +2,7 @@ import os
 import numpy as np
 import faiss
 from tqdm import tqdm
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, Dataset, Sequence, Value, load_from_disk
 from loguru import logger
 import multiprocessing
 from functools import partial
@@ -201,254 +201,285 @@ if __name__ == "__main__":
         # --- Aggregate Data for this Chunk ---
         chunk_aggregate_start_time = time.time()
         logger.info(f"Aggregating data for chunk {chunk_idx}...")
-        all_texts_repeated_chunk = []
-        all_features_list_chunk = []
-        total_patches_chunk = 0
-        total_texts_items_chunk = 0  # Original count per text item
+        # Keep original texts
+        all_original_texts_chunk = []
+        # Keep a list of the reshaped index arrays (one array [items, patches] per batch)
+        all_reshaped_indices_chunk = []
+        # Keep track of patches per item if it might vary (safer)
+        # Or just store the start/end index of each batch's indices in the flattened list
+        batch_patch_counts = []  # List of (original_num_items, patches_per_item) for each batch
 
-        # Sort loaded data by batch_id for consistency, though not strictly necessary for aggregation order
+        # Sort loaded data by batch_id
         loaded_chunk_data.sort(key=lambda x: x["batch_id"])
 
+        aggregated_features_list_chunk = []  # List to hold flattened features [batch_total_patches, dim]
+
         for batch_data in tqdm(
-            loaded_chunk_data, desc=f"Aggregating Chunk {chunk_idx}"
+            loaded_chunk_data,
+            desc=f"Aggregating Data & Preparing Search for Chunk {chunk_idx}",
         ):
-            texts = batch_data["texts"]
-            features = batch_data["features"]
-            # batch_id = batch_data["batch_id"] # Use for logging if needed
+            texts = batch_data["texts"]  # Original texts
+            features = batch_data["features"]  # Original features [items, patches, dim]
+            batch_id = batch_data["batch_id"]
 
-            if features.size == 0 or len(texts) == 0 or features.shape[0] != len(texts):
+            if features.ndim != 3 or features.shape[2] != input_dim:
                 logger.warning(
-                    f"Skipping aggregation for invalid data in loaded batch {batch_data['batch_id']}."
+                    f"Batch {batch_id}: Expected 3D features [items, patches, {input_dim}], got shape {features.shape}. Skipping."
                 )
                 continue
-
-            original_num_items = len(texts)
-            current_batch_features = None
-            patches_per_item = 1  # Default for 2D features
-
-            # Determine patches_per_item and reshape features to [total_patches, dim]
-            if features.ndim == 3:  # Assume [items, patches, dim]
-                if features.shape[0] != original_num_items:
-                    logger.error(
-                        f"Batch {batch_data['batch_id']}: Mismatch between texts count ({original_num_items}) and features first dim ({features.shape[0]}) in 3D array. Skipping."
-                    )
-                    continue
-                if features.shape[2] != input_dim:
-                    logger.error(
-                        f"Batch {batch_data['batch_id']}: Feature dimension mismatch for 3D array (Expected {input_dim}, Got {features.shape[2]}). Skipping."
-                    )
-                    continue
-
-                patches_per_item = features.shape[1]
-                current_batch_features = features.reshape(-1, input_dim)
-
-            elif features.ndim == 2:  # Assume [items, dim]
-                if features.shape[0] != original_num_items:
-                    logger.error(
-                        f"Batch {batch_data['batch_id']}: Mismatch between texts count ({original_num_items}) and features count ({features.shape[0]}) for 2D array. Skipping."
-                    )
-                    continue
-                if features.shape[1] != input_dim:
-                    logger.error(
-                        f"Batch {batch_data['batch_id']}: Feature dimension mismatch for 2D array (Expected {input_dim}, Got {features.shape[1]}). Skipping."
-                    )
-                    continue
-                current_batch_features = (
-                    features  # Already in [items, dim] format (patches_per_item=1)
-                )
-                patches_per_item = 1
-
-            else:
+            if features.shape[0] != len(texts):
                 logger.warning(
-                    f"Batch {batch_data['batch_id']}: Unexpected features ndim {features.ndim}. Skipping."
+                    f"Batch {batch_id}: Mismatch between texts ({len(texts)}) and features items ({features.shape[0]}). Skipping."
                 )
                 continue
 
-            if current_batch_features is None or current_batch_features.shape[0] == 0:
-                logger.info(
-                    f"Batch {batch_data['batch_id']} resulted in 0 valid features after processing. Skipping."
-                )
+            original_num_items = features.shape[0]
+            patches_per_item = features.shape[1]
+            batch_total_patches = original_num_items * patches_per_item
+
+            if batch_total_patches == 0:
+                logger.info(f"Batch {batch_id} has no patches. Skipping.")
                 continue
 
-            # Repeat texts according to patches_per_item
-            repeated_texts = [text for text in texts for _ in range(patches_per_item)]
+            # Reshape features for search: [items, patches, dim] -> [total_patches, dim]
+            features_for_search = features.reshape(-1, input_dim)
 
-            # Sanity check after repeating
-            if len(repeated_texts) != current_batch_features.shape[0]:
-                logger.error(
-                    f"Batch {batch_data['batch_id']}: Mismatch after text repetition! Texts: {len(repeated_texts)}, Features: {current_batch_features.shape[0]}. Patches_per_item={patches_per_item}, Original texts={original_num_items}. Skipping batch."
-                )
-                continue
+            # Add to the list for chunk concatenation
+            aggregated_features_list_chunk.append(features_for_search)
 
-            all_features_list_chunk.append(current_batch_features)
-            all_texts_repeated_chunk.extend(repeated_texts)
-            total_patches_chunk += current_batch_features.shape[0]
-            total_texts_items_chunk += original_num_items  # Count original text items
+            # Store original texts and metadata for reshaping indices later
+            all_original_texts_chunk.extend(texts)
+            batch_patch_counts.append((original_num_items, patches_per_item))
 
-        # Clear loaded_chunk_data list as contents are now in aggregated lists/arrays
+        # Clear loaded_chunk_data list
         del loaded_chunk_data
         gc.collect()
 
-        if not all_features_list_chunk:
+        # Concatenate features for the entire chunk
+        if not aggregated_features_list_chunk:
             logger.warning(
-                f"Chunk {chunk_idx} aggregation resulted in 0 features. Skipping processing for this chunk."
+                f"Chunk {chunk_idx} resulted in no valid features after processing batches. Skipping."
             )
-            # Cleanup aggregated intermediate lists even if empty
-            del all_features_list_chunk
-            del all_texts_repeated_chunk
+            del all_original_texts_chunk
+            del batch_patch_counts
+            del aggregated_features_list_chunk
             gc.collect()
+            # Skip to next chunk... (need continue logic)
             chunk_start_index = chunk_end_index
             chunk_idx += 1
-            continue  # Move to the next chunk
+            continue
 
-        # Concatenate all features for the current chunk
         logger.info(f"Concatenating features for chunk {chunk_idx}...")
         try:
-            final_features_array_chunk = np.concatenate(all_features_list_chunk, axis=0)
-            # Clear the list to free memory immediately after concatenation
-            del all_features_list_chunk
-            gc.collect()
-        except ValueError as e:
-            logger.error(
-                f"Error during concatenation for chunk {chunk_idx}, likely due to inconsistent feature dimensions: {e}. Skipping chunk.",
-                exc_info=True,
+            final_features_array_chunk = np.concatenate(
+                aggregated_features_list_chunk, axis=0
             )
-            # Cleanup
-            del all_texts_repeated_chunk
-            del all_features_list_chunk  # Ensure this is gone
+            del aggregated_features_list_chunk  # Free memory
             gc.collect()
+        except Exception as e:
+            logger.error(
+                f"Error concatenating features for chunk {chunk_idx}: {e}. Skipping chunk."
+            )
+            del all_original_texts_chunk
+            del batch_patch_counts
+            del aggregated_features_list_chunk  # Ensure this is gone
+            gc.collect()
+            # Skip to next chunk...
             chunk_start_index = chunk_end_index
             chunk_idx += 1
-            continue  # Move to the next chunk
-        except MemoryError:
-            logger.error(
-                f"Memory Error: Not enough RAM to concatenate features for chunk {chunk_idx}. This chunk might be too large or CHUNK_SIZE needs reducing."
-            )
-            logger.error(
-                f"Attempted concatenation size approx: {total_patches_chunk * input_dim * 4 / (1024**3):.2f} GB"
-            )
-            # Cleanup
-            del all_features_list_chunk
-            del all_texts_repeated_chunk
-            gc.collect()
-            chunk_start_index = chunk_end_index
-            chunk_idx += 1
-            continue  # Move to the next chunk
+            continue
 
+        total_patches_in_chunk = final_features_array_chunk.shape[0]
+        total_original_items_in_chunk = len(all_original_texts_chunk)
         logger.info(
-            f"Chunk {chunk_idx} aggregation complete. Total patches: {final_features_array_chunk.shape[0]}."
+            f"Chunk {chunk_idx} aggregation complete. Total original items: {total_original_items_in_chunk}, Total patches: {total_patches_in_chunk}."
         )
         logger.info(
             f"Chunk aggregation took {time.time() - chunk_aggregate_start_time:.2f} seconds."
         )
-        gc.collect()  # Collect after aggregation
-
-        # Final check for chunk data
-        if final_features_array_chunk.shape[0] != len(all_texts_repeated_chunk):
-            logger.error(
-                f"FATAL: Mismatch between chunk aggregated features ({final_features_array_chunk.shape[0]}) and texts ({len(all_texts_repeated_chunk)}) for chunk {chunk_idx}! Skipping processing for this chunk."
-            )
-            # Cleanup
-            del all_texts_repeated_chunk
-            del final_features_array_chunk
-            gc.collect()
-            chunk_start_index = chunk_end_index
-            chunk_idx += 1
-            continue  # Move to the next chunk
+        gc.collect()
 
         # --- Faiss Search for this Chunk ---
         chunk_search_start_time = time.time()
         logger.info(
-            f"Performing Faiss search for chunk {chunk_idx} ({final_features_array_chunk.shape[0]} features)..."
+            f"Performing Faiss search for chunk {chunk_idx} ({total_patches_in_chunk} features)..."
         )
 
-        # Faiss expects float32
         if final_features_array_chunk.dtype != np.float32:
-            logger.warning(
-                f"Chunk {chunk_idx}: Feature array dtype is {final_features_array_chunk.dtype}, converting to float32 for Faiss."
-            )
             final_features_array_chunk = final_features_array_chunk.astype(np.float32)
-            gc.collect()  # Collect after type conversion if it created a copy
+            gc.collect()
 
         try:
-            # Use the pre-initialized global 'index'
-            distances_chunk, indices_chunk = index.search(
+            distances_chunk, indices_chunk_flat = index.search(
                 final_features_array_chunk, 1
-            )  # Search for the 1 nearest neighbor
-            indices_chunk = (
-                indices_chunk.ravel()
-            )  # Flatten the indices array [n, 1] -> [n]
+            )
+            indices_chunk_flat = (
+                indices_chunk_flat.ravel()
+            )  # Shape [total_patches_in_chunk]
             logger.info(f"Faiss search for chunk {chunk_idx} completed.")
         except Exception as e:
             logger.error(
-                f"Error during Faiss search for chunk {chunk_idx}: {e}. Skipping chunk.",
-                exc_info=True,
+                f"Error during Faiss search for chunk {chunk_idx}: {e}. Skipping chunk."
             )
-            # Cleanup
-            del all_texts_repeated_chunk
+            del all_original_texts_chunk
+            del batch_patch_counts
             del final_features_array_chunk
+            del distances_chunk
             gc.collect()
+            # Skip to next chunk...
             chunk_start_index = chunk_end_index
             chunk_idx += 1
-            continue  # Move to the next chunk
+            continue
 
         logger.info(
             f"Chunk search took {time.time() - chunk_search_start_time:.2f} seconds."
         )
-        # Clear features array immediately after search
+        # Clear features array and distances immediately after search
         del final_features_array_chunk
-        del distances_chunk  # We don't need distances
+        del distances_chunk
         gc.collect()
+
+        # --- Reshape Indices Back to Original Structure ---
+        chunk_reshape_start_time = time.time()
+        logger.info(f"Reshaping indices for chunk {chunk_idx}...")
+
+        # Assuming constant patches_per_item for simplicity based on your description (261)
+        # If patches_per_item can vary *per item*, this would need a more complex loop/logic.
+        # Assuming features.shape[1] is consistent across items and batches:
+        if not batch_patch_counts:
+            logger.warning(
+                f"No batch patch counts recorded for chunk {chunk_idx}. Cannot reshape indices. Skipping."
+            )
+            del all_original_texts_chunk
+            del indices_chunk_flat
+            gc.collect()
+            # Skip to next chunk...
+            chunk_start_index = chunk_end_index
+            chunk_idx += 1
+            continue
+
+        # Assuming patches_per_item is consistent across all data
+        # A safer check: verify all patches_per_item in batch_patch_counts are the same
+        unique_patch_counts = set([count for items, count in batch_patch_counts])
+        if len(unique_patch_counts) != 1:
+            logger.error(
+                f"Chunk {chunk_idx}: Inconsistent patches_per_item detected: {unique_patch_counts}. Cannot reshape simply. Skipping."
+            )
+            del all_original_texts_chunk
+            del batch_patch_counts
+            del indices_chunk_flat
+            gc.collect()
+            # Skip to next chunk...
+            chunk_start_index = chunk_end_index
+            chunk_idx += 1
+            continue
+
+        consistent_patches_per_item = unique_patch_counts.pop()
+
+        if (
+            indices_chunk_flat.shape[0]
+            != total_original_items_in_chunk * consistent_patches_per_item
+        ):
+            logger.error(
+                f"FATAL: Mismatch between total flat indices ({indices_chunk_flat.shape[0]}) and expected total patches ({total_original_items_in_chunk} * {consistent_patches_per_item}) for chunk {chunk_idx}! Skipping save."
+            )
+            del all_original_texts_chunk
+            del batch_patch_counts
+            del indices_chunk_flat
+            gc.collect()
+            # Skip to next chunk...
+            chunk_start_index = chunk_end_index
+            chunk_idx += 1
+            continue
+
+        try:
+            # Reshape flat indices [total_patches] -> [total_original_items, patches_per_item]
+            reshaped_indices_chunk = indices_chunk_flat.reshape(
+                total_original_items_in_chunk, consistent_patches_per_item
+            )
+            # Convert the numpy array of arrays/lists for the Dataset column
+            reshaped_indices_list_of_lists = reshaped_indices_chunk.tolist()
+            logger.info(f"Indices reshaped successfully for chunk {chunk_idx}.")
+
+        except Exception as e:
+            logger.error(
+                f"Error reshaping indices for chunk {chunk_idx}: {e}. Skipping save."
+            )
+            del all_original_texts_chunk
+            del batch_patch_counts
+            del indices_chunk_flat
+            if "reshaped_indices_chunk" in locals():
+                del reshaped_indices_chunk
+            gc.collect()
+            # Skip to next chunk...
+            chunk_start_index = chunk_end_index
+            chunk_idx += 1
+            continue
+
+        del indices_chunk_flat  # Free flat indices memory
+        del reshaped_indices_chunk  # Free numpy reshaped array memory
+        gc.collect()
+        logger.info(
+            f"Chunk index reshaping took {time.time() - chunk_reshape_start_time:.2f} seconds."
+        )
 
         # --- Create and Save Chunk Dataset ---
         chunk_dataset_start_time = time.time()
         logger.info(f"Creating and saving dataset for chunk {chunk_idx}...")
 
-        if len(all_texts_repeated_chunk) != len(indices_chunk):
+        if len(all_original_texts_chunk) != len(reshaped_indices_list_of_lists):
             logger.error(
-                f"FATAL: Mismatch between chunk texts ({len(all_texts_repeated_chunk)}) and indices ({len(indices_chunk)}) count after search for chunk {chunk_idx}! Skipping save."
+                f"FATAL: Mismatch between chunk original texts ({len(all_original_texts_chunk)}) and reshaped indices ({len(reshaped_indices_list_of_lists)}) count for chunk {chunk_idx}! Skipping save."
             )
-            # Cleanup
-            del all_texts_repeated_chunk
-            del indices_chunk
+            del all_original_texts_chunk
+            del reshaped_indices_list_of_lists
+            del batch_patch_counts
             gc.collect()
+            # Don't increment chunk index, but log error and potentially exit or mark for retry
+            # For now, follow the pattern of skipping the chunk
             chunk_start_index = chunk_end_index
             chunk_idx += 1
             continue  # Move to the next chunk
 
         chunk_data_dict = {
-            "texts": all_texts_repeated_chunk,
-            "feature_indices": indices_chunk.tolist(),  # Convert numpy array to list for Dataset.from_dict
+            "texts": all_original_texts_chunk,
+            "feature_indices": reshaped_indices_list_of_lists,  # This is now list[list[int]]
         }
 
         try:
-            # Create dataset for the current chunk
             chunk_ds = Dataset.from_dict(chunk_data_dict)
+
+            # Define the features for the column containing lists of ints
+            # This tells datasets what to expect for the "feature_indices" column
+            chunk_ds = chunk_ds.cast_column("feature_indices", Sequence(Value("int32")))
+
             chunk_save_path = os.path.join(TEMP_DATA_DIR, f"chunk_{chunk_idx}")
-            # Push to hub in case running of disk space
+            # Push to hub first
             chunk_ds.push_to_hub(OUTPUT_REPO, f"chunk_{chunk_idx}", split="train")
-            # Save the chunk dataset to disk. This creates a directory structure.
+            # Save locally for final combination
             chunk_ds.save_to_disk(chunk_save_path)
+
             all_processed_chunk_paths.append(chunk_save_path)  # Record the path
             logger.info(
                 f"Chunk {chunk_idx} dataset saved to {chunk_save_path}. Rows: {len(chunk_ds)}"
             )
+
         except Exception as e:
             logger.error(
-                f"Failed to create or save chunk {chunk_idx} dataset to disk: {e}",
+                f"Failed to create or save chunk {chunk_idx} dataset: {e}",
                 exc_info=True,
             )
             # Cleanup
             del chunk_data_dict
             if "chunk_ds" in locals():
                 del chunk_ds
-            # Don't skip chunk index increment even on save failure, just log error
+            # Error happened during save, still move to the next chunk
         finally:
             # --- Clean up memory for the current chunk ---
-            del all_texts_repeated_chunk  # The list
-            del indices_chunk  # The numpy array
-            del chunk_data_dict  # The dictionary
-            # No need to delete chunk_ds if save failed, it might not exist, handle in except block
+            del all_original_texts_chunk
+            del reshaped_indices_list_of_lists
+            del batch_patch_counts
+            del chunk_data_dict
             gc.collect()
             logger.info(f"Memory cleanup complete for chunk {chunk_idx}.")
             logger.info(
@@ -478,11 +509,31 @@ if __name__ == "__main__":
         # Specify 'arrow' builder for local files.
         # Need to specify data_files pattern to find arrow files within subdirectories
         # Example path: ./temp_indexed_chunks/chunk_0/data/train-00000-of-NNNNN.arrow
-        arrow_files_pattern = os.path.join(TEMP_DATA_DIR, "**", "data-*.arrow")
-        logger.info(f"Searching for arrow files with pattern: {arrow_files_pattern}")
+        # arrow_files_pattern = os.path.join(TEMP_DATA_DIR, "**", "data-*.arrow")
+        # logger.info(f"Searching for arrow files with pattern: {arrow_files_pattern}")
 
-        final_combined_ds = load_dataset(
-            "arrow", data_files=arrow_files_pattern, split="train"
+        # final_combined_ds = load_dataset(
+        #     "arrow", data_files=arrow_files_pattern, split="train"
+        # )
+
+        # Load each chunk dataset and combine them
+        chunk_datasets = []
+        for chunk_path in all_processed_chunk_paths:
+            chunk_ds = load_from_disk(chunk_path)
+            chunk_datasets.append(chunk_ds)
+
+        # Combine all chunk datasets into one
+        final_combined_ds = Dataset.from_dict(
+            {
+                "texts": [],
+                "feature_indices": [],
+            }
+        )
+        for chunk_ds in chunk_datasets:
+            final_combined_ds = Dataset.concatenate(final_combined_ds, chunk_ds)
+        # Cast the feature_indices column to the correct type
+        final_combined_ds = final_combined_ds.cast_column(
+            "feature_indices", Sequence(Value("int32"))
         )
 
         logger.info("Combined dataset loaded successfully.")
